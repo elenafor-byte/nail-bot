@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/28296827/README.md)
 # Nail Studio Bot
 
 Telegram бот для приёма записей от клиентов.
