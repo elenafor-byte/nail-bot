@@ -11,10 +11,32 @@ TOKEN = os.environ.get("BOT_TOKEN", "")
 MASTER_CHAT_ID = os.environ.get("MASTER_CHAT_ID", "")
 TELEGRAM_API = f"https://api.telegram.org/bot{TOKEN}"
 
+# Хранилище записей в памяти: booking_id -> {client_chat_id, booking}
+pending_bookings = {}
 
-def send_message(chat_id, text):
-    requests.post(f"{TELEGRAM_API}/sendMessage", json={
+
+def send_message(chat_id, text, reply_markup=None):
+    payload = {
         "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML"
+    }
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
+    requests.post(f"{TELEGRAM_API}/sendMessage", json=payload)
+
+
+def answer_callback(callback_id, text=""):
+    requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+        "callback_query_id": callback_id,
+        "text": text
+    })
+
+
+def edit_message(chat_id, message_id, text):
+    requests.post(f"{TELEGRAM_API}/editMessageText", json={
+        "chat_id": chat_id,
+        "message_id": message_id,
         "text": text,
         "parse_mode": "HTML"
     })
@@ -26,11 +48,56 @@ def webhook():
     if not data:
         return "ok"
 
+    # Нажатие кнопки мастером
+    callback = data.get("callback_query")
+    if callback:
+        callback_id = callback["id"]
+        cb_data = callback.get("data", "")
+        message_id = callback["message"]["message_id"]
+        master_chat = callback["message"]["chat"]["id"]
+
+        if cb_data.startswith("confirm:"):
+            booking_id = cb_data.replace("confirm:", "")
+            booking_info = pending_bookings.get(booking_id)
+
+            if booking_info:
+                client_chat_id = booking_info["client_chat_id"]
+                booking = booking_info["booking"]
+
+                # Сообщение клиентке
+                send_message(client_chat_id,
+                    "🌸 <b>Ваша запись подтверждена!</b>\n\n"
+                    f"💅 {booking.get('service', '—')}\n"
+                    f"📅 {booking.get('date', '—')} в {booking.get('time', '—')}\n\n"
+                    "Ждём вас! Если планы изменятся — напишите заранее 🙏"
+                )
+
+                # Обновить сообщение мастеру — убрать кнопку
+                edit_message(master_chat, message_id,
+                    "✅ <b>Запись подтверждена!</b>\n\n"
+                    f"💅 <b>Услуга:</b> {booking.get('service', '—')}\n"
+                    f"📅 <b>Дата:</b> {booking.get('date', '—')} в {booking.get('time', '—')}\n"
+                    f"👤 <b>Клиент:</b> {booking.get('client', '—')}\n"
+                    f"📞 <b>Телефон:</b> {booking.get('phone', '—')}"
+                    + (f"\n💬 <b>Пожелания:</b> {booking['comment']}" if booking.get('comment') else "")
+                )
+
+                answer_callback(callback_id, "✅ Клиентка уведомлена!")
+                del pending_bookings[booking_id]
+            else:
+                answer_callback(callback_id, "Запись уже подтверждена")
+
+        return "ok"
+
+    # Обычное сообщение
     message = data.get("message", {})
+    if not message:
+        return "ok"
+
     chat_id = message.get("chat", {}).get("id")
     text = message.get("text", "")
 
-    # Команда /start — клиентка открывает бота
+    # /start
     if text == "/start":
         send_message(chat_id,
             "🌸 <b>Добро пожаловать в Nail Studio!</b>\n\n"
@@ -38,13 +105,20 @@ def webhook():
         )
         return "ok"
 
-    # Данные из Web App (tg.sendData)
+    # Данные из Web App
     web_app_data = message.get("web_app_data", {}).get("data")
     if web_app_data:
         try:
             booking = json.loads(web_app_data)
+            booking_id = str(message.get("message_id", "0"))
 
-            # Сообщение мастеру
+            # Сохраняем запись
+            pending_bookings[booking_id] = {
+                "client_chat_id": chat_id,
+                "booking": booking
+            }
+
+            # Сообщение мастеру с кнопкой
             master_text = (
                 "🌸 <b>Новая запись!</b>\n\n"
                 f"💅 <b>Услуга:</b> {booking.get('service', '—')}\n"
@@ -56,18 +130,22 @@ def webhook():
                 master_text += f"\n💬 <b>Пожелания:</b> {booking['comment']}"
 
             if MASTER_CHAT_ID:
-                send_message(MASTER_CHAT_ID, master_text)
+                send_message(MASTER_CHAT_ID, master_text, reply_markup={
+                    "inline_keyboard": [[
+                        {"text": "✅ Подтвердить запись", "callback_data": f"confirm:{booking_id}"}
+                    ]]
+                })
 
-            # Подтверждение клиентке
+            # Клиентке — запись принята
             send_message(chat_id,
-                "✅ <b>Запись принята!</b>\n\n"
+                "⏳ <b>Запись принята!</b>\n\n"
                 f"💅 {booking.get('service', '—')}\n"
                 f"📅 {booking.get('date', '—')} в {booking.get('time', '—')}\n\n"
-                "Я свяжусь с вами для подтверждения. До встречи! 🌸"
+                "Мастер скоро подтвердит вашу запись. Ожидайте сообщения! 🌸"
             )
 
         except Exception as e:
-            logging.error(f"Error parsing booking: {e}")
+            logging.error(f"Error: {e}")
 
     return "ok"
 
